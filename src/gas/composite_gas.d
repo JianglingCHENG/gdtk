@@ -75,7 +75,7 @@ public:
             _energy_mode_names[0] = "vibroelectronic";
             create_energy_mode_reverse_lookup();
             mThermo = new TwoTemperatureGasMixture(L, _species_names);
-            mTransProps = new TwoTemperatureTransProps(L, _species_names);
+            mTransProps = makeTwoTemperatureTransProps(L);
             break;
         case "three-temperature-gas":
             _n_modes = 2;
@@ -112,6 +112,24 @@ public:
             _charge[isp] = getInt(L, -1, "charge");
             lua_pop(L, 1);
             lua_pop(L, 1);
+        }
+    }
+
+    TransportPropertiesModel makeTwoTemperatureTransProps(lua_State *L)
+    {
+        string transportModel = "GuptaYos";
+        lua_getglobal(L, "transport_model");
+        if (lua_isstring(L, -1)) transportModel = to!string(lua_tostring(L, -1));
+        lua_pop(L, 1);
+
+        switch (transportModel) {
+        case "GuptaYos":
+            return new TwoTemperatureTransProps(L, _species_names);
+        case "ScaledGuptaYos":
+            return new ScaledTwoTemperatureTransProps(L, _species_names);
+        default:
+            string errMsg = format("Problem trying to construct two-temperature transport model. The transport_model variant '%s' is not known.\n", transportModel);
+            throw new Error(errMsg);
         }
     }
 

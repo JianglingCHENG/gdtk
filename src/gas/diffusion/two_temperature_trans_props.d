@@ -387,6 +387,64 @@ private:
     }
 }
 
+class ScaledTwoTemperatureTransProps : TwoTemperatureTransProps {
+public:
+    this(lua_State *L, string[] speciesNames)
+    {
+        super(L, speciesNames);
+        mMuScale = getGlobalDoubleWithDefault(L, "mu_scale", 1.0);
+        mKScale = getGlobalDoubleWithDefault(L, "k_scale", 1.0);
+        mKModesScale = getGlobalDoubleWithDefault(L, "k_modes_scale", 1.0);
+        mDiffusionScale = getGlobalDoubleWithDefault(L, "diffusion_scale", 1.0);
+        requirePositive("mu_scale", mMuScale);
+        requirePositive("k_scale", mKScale);
+        requirePositive("k_modes_scale", mKModesScale);
+        requirePositive("diffusion_scale", mDiffusionScale);
+    }
+
+    @nogc
+    override void updateTransProps(ref GasState gs, GasModel gm)
+    {
+        super.updateTransProps(gs, gm);
+        gs.mu *= mMuScale;
+        gs.k *= mKScale;
+        if (gs.k_modes.length > 0) gs.k_modes[0] *= mKModesScale;
+    }
+
+    @nogc
+    override void binaryDiffusionCoefficients(ref const(GasState) gs, ref number[][] D)
+    {
+        super.binaryDiffusionCoefficients(gs, D);
+        foreach (ref Di; D) {
+            foreach (ref Dij; Di) {
+                Dij *= mDiffusionScale;
+            }
+        }
+    }
+
+private:
+    double mMuScale = 1.0;
+    double mKScale = 1.0;
+    double mKModesScale = 1.0;
+    double mDiffusionScale = 1.0;
+
+    double getGlobalDoubleWithDefault(lua_State *L, string key, double defaultValue)
+    {
+        double value = defaultValue;
+        lua_getglobal(L, key.toStringz);
+        if (lua_isnumber(L, -1)) value = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+        return value;
+    }
+
+    void requirePositive(string key, double value)
+    {
+        if (value <= 0.0) {
+            throw new Error(key ~ " must be positive for ScaledGuptaYos transport_model.");
+        }
+    }
+}
+
 
 unittest {
     import std.file;
