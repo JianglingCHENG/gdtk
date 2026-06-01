@@ -127,6 +127,8 @@ public:
             return new TwoTemperatureTransProps(L, _species_names);
         case "ScaledGuptaYos":
             return new ScaledTwoTemperatureTransProps(L, _species_names);
+        case "CustomLAMP":
+            return new CustomLAMPTransProps(L, _species_names);
         default:
             string errMsg = format("Problem trying to construct two-temperature transport model. The transport_model variant '%s' is not known.\n", transportModel);
             throw new Error(errMsg);
@@ -245,6 +247,17 @@ public:
     {
         debug{ assert(D.length==_n_species); }
         mTransProps.binaryDiffusionCoefficients(Q, D);
+    }
+
+    void customLAMPNumberDensities(ref const(GasState) Q, ref number[] numberDensities)
+    {
+        auto customLAMP = cast(CustomLAMPTransProps)mTransProps;
+        if (customLAMP is null) {
+            throw new Error(
+                "customLAMPNumberDensities() is only valid for transport_model = 'CustomLAMP'."
+            );
+        }
+        customLAMP.numberDensities(Q, numberDensities);
     }
 
     @nogc override void minimum_mixture_energy(ref GasState Q)

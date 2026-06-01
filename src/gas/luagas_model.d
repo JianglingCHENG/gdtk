@@ -31,6 +31,7 @@ version (with_dvode)
 import gas.gas_model;
 import gas.gas_state;
 import gas.init_gas_model: init_gas_model;
+import gas.composite_gas : CompositeGas;
 import gas.cea_gas;
 import gas.physical_constants;
 
@@ -693,6 +694,28 @@ extern(C) int binary_diffusion_coefficients(lua_State* L)
     return 1;
 }
 
+extern(C) int customLAMPNumberDensities(lua_State* L)
+{
+    auto gm = checkGasModel(L, 1);
+    auto compositeGas = cast(CompositeGas)gm;
+    if (compositeGas is null) {
+        luaL_error(L, "%s", "customLAMPNumberDensities() requires a CompositeGas.".toStringz);
+    }
+
+    number[] numberDensities;
+    numberDensities.length = 11;
+    auto Q = GasState(gm);
+    getGasStateFromTable(L, gm, 2, Q);
+    compositeGas.customLAMPNumberDensities(Q, numberDensities);
+
+    lua_newtable(L);
+    foreach (i, numberDensity; numberDensities) {
+        lua_pushnumber(L, numberDensity);
+        lua_rawseti(L, -2, to!int(i+1));
+    }
+    return 1;
+}
+
 void getSpeciesValsFromTable(lua_State* L, GasModel gm, int idx,
                              ref double[] vals, string tabName)
 {
@@ -1311,6 +1334,8 @@ void registerGasModel(lua_State* L)
     lua_setfield(L, -2, "conc2massf");
     lua_pushcfunction(L, &binary_diffusion_coefficients);
     lua_setfield(L, -2, "binary_diffusion_coefficients");
+    lua_pushcfunction(L, &customLAMPNumberDensities);
+    lua_setfield(L, -2, "customLAMPNumberDensities");
 
     // Make class visible
     lua_setglobal(L, GasModelMT.toStringz);
