@@ -67,7 +67,7 @@ public:
         case "thermally-perfect-gas":
             _n_modes = 0;
             mThermo = new ThermPerfGasMixture(L, _species_names);
-            mTransProps = new GasMixtureTransProps(L, _species_names);
+            mTransProps = makeThermallyPerfectTransProps(L);
             break;
         case "two-temperature-gas":
             _n_modes = 1;
@@ -112,6 +112,62 @@ public:
             _charge[isp] = getInt(L, -1, "charge");
             lua_pop(L, 1);
             lua_pop(L, 1);
+        }
+    }
+
+    TransportPropertiesModel makeThermallyPerfectTransProps(lua_State *L)
+    {
+        string transportModel = "GasMixture";
+        bool explicitlySelected = false;
+        lua_getglobal(L, "transport_model");
+        if (lua_isstring(L, -1)) {
+            transportModel = to!string(lua_tostring(L, -1));
+            explicitlySelected = true;
+        }
+        lua_pop(L, 1);
+
+        switch (transportModel) {
+        case "GasMixture":
+            if (transportFingerprintEnabled(L)) {
+                writefln(
+                    "TRANSPORT_FINGERPRINT: GasMixtureTransProps active physical_model=thermally-perfect-gas transport_model=%s",
+                    explicitlySelected ? "GasMixture" : "<unset>"
+                );
+            }
+            return new GasMixtureTransProps(L, _species_names);
+        case "GuptaYos":
+            if (transportFingerprintEnabled(L)) {
+                writefln(
+                    "TRANSPORT_FINGERPRINT: EquilibriumTemperatureTransProps active physical_model=thermally-perfect-gas transport_model=GuptaYos k_mapping=k_plus_k_mode"
+                );
+            }
+            return new EquilibriumTemperatureTransProps(
+                new TwoTemperatureTransProps(L, _species_names), _species_names, _mol_masses
+            );
+        case "ScaledGuptaYos":
+            if (transportFingerprintEnabled(L)) {
+                writefln(
+                    "TRANSPORT_FINGERPRINT: EquilibriumTemperatureTransProps active physical_model=thermally-perfect-gas transport_model=ScaledGuptaYos k_mapping=k_plus_k_mode"
+                );
+            }
+            return new EquilibriumTemperatureTransProps(
+                new ScaledTwoTemperatureTransProps(L, _species_names), _species_names, _mol_masses
+            );
+        case "CustomLAMP":
+            if (transportFingerprintEnabled(L)) {
+                writefln(
+                    "TRANSPORT_FINGERPRINT: EquilibriumTemperatureTransProps active physical_model=thermally-perfect-gas transport_model=CustomLAMP k_mapping=k_plus_k_mode"
+                );
+            }
+            return new EquilibriumTemperatureTransProps(
+                new CustomLAMPTransProps(L, _species_names), _species_names, _mol_masses
+            );
+        default:
+            string errMsg = format(
+                "Problem trying to construct thermally-perfect transport model. The transport_model variant '%s' is not known.\n",
+                transportModel
+            );
+            throw new Error(errMsg);
         }
     }
 
@@ -252,12 +308,18 @@ public:
     void customLAMPNumberDensities(ref const(GasState) Q, ref number[] numberDensities)
     {
         auto customLAMP = cast(CustomLAMPTransProps)mTransProps;
-        if (customLAMP is null) {
-            throw new Error(
-                "customLAMPNumberDensities() is only valid for transport_model = 'CustomLAMP'."
-            );
+        if (customLAMP !is null) {
+            customLAMP.numberDensities(Q, numberDensities);
+            return;
         }
-        customLAMP.numberDensities(Q, numberDensities);
+        auto equilibriumCustomLAMP = cast(EquilibriumTemperatureTransProps)mTransProps;
+        if (equilibriumCustomLAMP !is null) {
+            equilibriumCustomLAMP.customLAMPNumberDensities(Q, numberDensities);
+            return;
+        }
+        throw new Error(
+            "customLAMPNumberDensities() is only valid for transport_model = 'CustomLAMP'."
+        );
     }
 
     @nogc override void minimum_mixture_energy(ref GasState Q)

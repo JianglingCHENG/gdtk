@@ -347,6 +347,12 @@ function writeThermPerfGas(f, species, db, optsTable)
 	   end
       end
    end
+   if transport_model == "GuptaYos" or transport_model == "ScaledGuptaYos" then
+      for _,sp in ipairs(species) do
+         f:write(string.format("db['%s'].type = '%s'\n", sp, db[sp].type))
+      end
+      writeCollisionIntegrals(f, species, db, optsTable)
+   end
 end
 
 function write2TAir(f, species, db, optsTable)
@@ -806,6 +812,23 @@ function prepareGasFile(inpFname, outFname)
    f:write(string.format("model = '%s'\n", modelStr))
    options = options or {}
    gasModels[string.upper(model)].writeFn(f, species, db, options)
+   if transport_model then
+      f:write(string.format("\ntransport_model = %q\n", transport_model))
+   end
+   local transportControls = {
+      "mu_scale",
+      "k_scale",
+      "k_modes_scale",
+      "diffusion_scale",
+   }
+   for _,key in ipairs(transportControls) do
+      if _G[key] ~= nil then
+         f:write(string.format("%s = %.17e\n", key, _G[key]))
+      end
+   end
+   if transport_fingerprint ~= nil then
+      f:write(string.format("transport_fingerprint = %s\n", tostring(transport_fingerprint)))
+   end
    f:close()
 end
 

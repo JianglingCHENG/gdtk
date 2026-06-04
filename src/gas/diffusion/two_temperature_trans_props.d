@@ -25,6 +25,8 @@ import std.math;
 import std.string;
 import std.conv;
 import std.algorithm;
+import std.stdio;
+import core.stdc.stdio : printf;
 
 import util.lua;
 import util.lua_service;
@@ -53,6 +55,10 @@ enum double CUSTOM_LAMP_ME = 9.1093837139e-31;
 enum double CUSTOM_LAMP_HVIC_DENOM_FLOOR = 1.0e-200;
 enum double CUSTOM_LAMP_PIVOT_FLOOR = 1.0e-300;
 enum double CUSTOM_LAMP_INTERNAL_DENOM_FLOOR = 1.0e-300;
+enum double CUSTOM_LAMP_BHK_SCALE = 1.0e-10;
+enum double CUSTOM_LAMP_HTHC_DENOM_FLOOR = 1.0e-300;
+enum double CUSTOM_LAMP_HTHC_DENOM_FLOOR_LOG = -690.7755278982137;
+enum double CUSTOM_LAMP_NUMBER_DENSITY_FLOOR = 1.0e10;
 
 @nogc number customLAMPNumberFromDouble(double value)
 {
@@ -69,6 +75,66 @@ enum double CUSTOM_LAMP_INTERNAL_DENOM_FLOOR = 1.0e-300;
         return value.re;
     } else {
         return value;
+    }
+}
+
+@nogc double customLAMPImag(in number value)
+{
+    version(complex_numbers) {
+        return value.im;
+    } else {
+        return 0.0;
+    }
+}
+
+@nogc bool customLAMPFiniteNumber(in number value)
+{
+    version(complex_numbers) {
+        return isFinite(value.re) && isFinite(value.im);
+    } else {
+        return isFinite(value);
+    }
+}
+
+@nogc void customLAMPDiagNonFinite(
+    const(char)* label,
+    ref const(GasState) gs,
+    number value,
+    number totalNumberDensity,
+    number electronDensity)
+{
+    printf(
+        "CUSTOM_LAMP_TRANSPORT_DIAG: non-finite %s rho=%.16e T=%.16e%+.16ei Tv=%.16e%+.16ei total-n=%.16e%+.16ei ne=%.16e%+.16ei value=%.16e%+.16ei\n",
+        label,
+        customLAMPReal(gs.rho),
+        customLAMPReal(gs.T),
+        customLAMPImag(gs.T),
+        gs.T_modes.length > 0 ? customLAMPReal(gs.T_modes[0]) : 0.0,
+        gs.T_modes.length > 0 ? customLAMPImag(gs.T_modes[0]) : 0.0,
+        customLAMPReal(totalNumberDensity),
+        customLAMPImag(totalNumberDensity),
+        customLAMPReal(electronDensity),
+        customLAMPImag(electronDensity),
+        customLAMPReal(value),
+        customLAMPImag(value)
+    );
+}
+
+bool transportFingerprintEnabled(lua_State *L)
+{
+    bool enabled = false;
+    lua_getglobal(L, "transport_fingerprint");
+    if (lua_isboolean(L, -1)) enabled = to!bool(lua_toboolean(L, -1));
+    lua_pop(L, 1);
+    return enabled;
+}
+
+@nogc double customLAMPPivotMetric(in number value)
+{
+    version(complex_numbers) {
+        return cabs(value);
+    } else {
+        return fabs(value);
     }
 }
 
@@ -424,35 +490,6 @@ private:
     }
 }
 
-version(complex_numbers) {
-
-class CustomLAMPTransProps : TransportPropertiesModel {
-public:
-    this(lua_State *L, string[] speciesNames)
-    {
-        throw new Error("CustomLAMP transport_model is not yet available in complex-number LMR builds.");
-    }
-
-    void numberDensities(ref const(GasState) gs, ref number[] result)
-    {
-        throw new Error("customLAMPNumberDensities() is not available in complex-number LMR builds.");
-    }
-
-    @nogc
-    override void updateTransProps(ref GasState gs, GasModel gm)
-    {
-        throw new Error("CustomLAMP transport_model is not yet available in complex-number LMR builds.");
-    }
-
-    @nogc
-    override void binaryDiffusionCoefficients(ref const(GasState) gs, ref number[][] D)
-    {
-        throw new Error("CustomLAMP transport_model is not yet available in complex-number LMR builds.");
-    }
-}
-
-} else {
-
 int customLAMPLampSpeciesIndex(string speciesName)
 {
     switch (speciesName) {
@@ -490,11 +527,10 @@ int customLAMPLampSpeciesIndex(string speciesName)
 
 @nogc number customLAMPNumberDensity(ref const(GasState) gs, int gdtkIndex, int lampIndex)
 {
-    enum double numberDensityFloor = 1.0e-10;
     number massf = gs.massf[gdtkIndex];
-    if (customLAMPReal(massf) <= 0.0) return customLAMPNumberFromDouble(numberDensityFloor);
+    if (customLAMPReal(massf) <= 0.0) return customLAMPNumberFromDouble(CUSTOM_LAMP_NUMBER_DENSITY_FLOOR);
     number n = gs.rho * massf / customLAMPLampMolarMass(lampIndex) * CUSTOM_LAMP_AVOGADRO_NUMBER;
-    return customLAMPReal(n) > numberDensityFloor ? n : customLAMPNumberFromDouble(numberDensityFloor);
+    return customLAMPReal(n) > CUSTOM_LAMP_NUMBER_DENSITY_FLOOR ? n : customLAMPNumberFromDouble(CUSTOM_LAMP_NUMBER_DENSITY_FLOOR);
 }
 
 @nogc double customLAMPSpeciesMass(int lampIndex)
@@ -570,19 +606,19 @@ int customLAMPLampSpeciesIndex(string speciesName)
     }
 }
 
-@nogc double customLAMPEqA1(double T, double a1, double a2, double a3, double a4, double a5, double a6)
+@nogc number customLAMPEqA1(number T, double a1, double a2, double a3, double a4, double a5, double a6)
 {
     return (a1 + a2 * pow(T, a3)) / (a4 + a5 * pow(T, a6)) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
 }
 
-@nogc double customLAMPEqA2(
-    double lnT,
+@nogc number customLAMPEqA2(
+    number lnT,
     double a1, double a2, double a3, double a4, double a5,
     double a6, double a7, double a8, double a9)
 {
-    double exponent = (lnT - a1) / a2;
-    double expPos = exp(exponent);
-    double expNeg = exp(-exponent);
+    number exponent = (lnT - a1) / a2;
+    number expPos = exp(exponent);
+    number expNeg = exp(-exponent);
     return (
         a3 * pow(lnT, a6) * expPos / (expPos + expNeg)
         + a7 * exp(-pow((lnT - a8) / a9, 2.0))
@@ -590,11 +626,11 @@ int customLAMPLampSpeciesIndex(string speciesName)
     ) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
 }
 
-@nogc double customLAMPFermiSwitch(double xLnTStar, double center, double width)
+@nogc number customLAMPFermiSwitch(number xLnTStar, double center, double width)
 {
-    double exponent = (xLnTStar - center) / width;
-    double expPos = exp(exponent);
-    double expNeg = exp(-exponent);
+    number exponent = (xLnTStar - center) / width;
+    number expPos = exp(exponent);
+    number expNeg = exp(-exponent);
     return expPos / (expPos + expNeg);
 }
 
@@ -702,13 +738,13 @@ int customLAMPLampSpeciesIndex(string speciesName)
     }
 }
 
-@nogc double customLAMPLnOmegaStar(double x, double a1, double a2, double a3, double a4, double a5, double a6, double a7)
+@nogc number customLAMPLnOmegaStar(number x, double a1, double a2, double a3, double a4, double a5, double a6, double a7)
 {
     return (a1 + a2 * x) * customLAMPFermiSwitch(x, a3, a4)
         + a5 * customLAMPFermiSwitch(x, a6, a7);
 }
 
-@nogc double customLAMPPhenomenologicalNN(double T, int speciesI, int speciesJ)
+@nogc number customLAMPPhenomenologicalNN(number T, int speciesI, int speciesJ)
 {
     double alphaI = customLAMPLaricchiutaPolarizability(speciesI);
     double alphaJ = customLAMPLaricchiutaPolarizability(speciesJ);
@@ -719,7 +755,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         / pow(alphaI * alphaJ, 9.5e-2);
     double cd = 1.57e1 * alphaI * alphaJ / (sqrt(alphaI / neffI) + sqrt(alphaJ / neffJ));
     double eps0 = 7.2e-1 * cd / pow(re, 6.0);
-    double x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
+    number x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
     double x0 = 8.002000e-1 * pow(beta, 4.925600e-2);
     double scale = pow(x0 * re, 2.0) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
     double a1 = customLAMPPhenomenologicalA11(0, beta);
@@ -729,11 +765,11 @@ int customLAMPLampSpeciesIndex(string speciesName)
     double a5 = customLAMPPhenomenologicalA11(4, beta);
     double a6 = customLAMPPhenomenologicalA11(5, beta);
     double a7 = customLAMPPhenomenologicalA11(6, beta);
-    double lnOmegaStar = customLAMPLnOmegaStar(x, a1, a2, a3, a4, a5, a6, a7);
+    number lnOmegaStar = customLAMPLnOmegaStar(x, a1, a2, a3, a4, a5, a6, a7);
     return exp(lnOmegaStar) * scale;
 }
 
-@nogc double customLAMPPhenomenologicalNN22(double T, int speciesI, int speciesJ)
+@nogc number customLAMPPhenomenologicalNN22(number T, int speciesI, int speciesJ)
 {
     double alphaI = customLAMPLaricchiutaPolarizability(speciesI);
     double alphaJ = customLAMPLaricchiutaPolarizability(speciesJ);
@@ -744,7 +780,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         / pow(alphaI * alphaJ, 9.5e-2);
     double cd = 1.57e1 * alphaI * alphaJ / (sqrt(alphaI / neffI) + sqrt(alphaJ / neffJ));
     double eps0 = 7.2e-1 * cd / pow(re, 6.0);
-    double x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
+    number x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
     double x0 = 8.002000e-1 * pow(beta, 4.925600e-2);
     double scale = pow(x0 * re, 2.0) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
     double a1 = customLAMPPhenomenologicalA22(0, beta);
@@ -757,7 +793,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     return exp(customLAMPLnOmegaStar(x, a1, a2, a3, a4, a5, a6, a7)) * scale;
 }
 
-@nogc double customLAMPPhenomenologicalNN12(double T, int speciesI, int speciesJ)
+@nogc number customLAMPPhenomenologicalNN12(number T, int speciesI, int speciesJ)
 {
     double alphaI = customLAMPLaricchiutaPolarizability(speciesI);
     double alphaJ = customLAMPLaricchiutaPolarizability(speciesJ);
@@ -768,7 +804,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         / pow(alphaI * alphaJ, 9.5e-2);
     double cd = 1.57e1 * alphaI * alphaJ / (sqrt(alphaI / neffI) + sqrt(alphaJ / neffJ));
     double eps0 = 7.2e-1 * cd / pow(re, 6.0);
-    double x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
+    number x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
     double x0 = 8.002000e-1 * pow(beta, 4.925600e-2);
     double scale = pow(x0 * re, 2.0) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
     return exp(customLAMPLnOmegaStar(
@@ -782,7 +818,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         customLAMPPhenomenologicalA12(6, beta))) * scale;
 }
 
-@nogc double customLAMPPhenomenologicalNN13(double T, int speciesI, int speciesJ)
+@nogc number customLAMPPhenomenologicalNN13(number T, int speciesI, int speciesJ)
 {
     double alphaI = customLAMPLaricchiutaPolarizability(speciesI);
     double alphaJ = customLAMPLaricchiutaPolarizability(speciesJ);
@@ -793,7 +829,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         / pow(alphaI * alphaJ, 9.5e-2);
     double cd = 1.57e1 * alphaI * alphaJ / (sqrt(alphaI / neffI) + sqrt(alphaJ / neffJ));
     double eps0 = 7.2e-1 * cd / pow(re, 6.0);
-    double x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
+    number x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
     double x0 = 8.002000e-1 * pow(beta, 4.925600e-2);
     double scale = pow(x0 * re, 2.0) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
     return exp(customLAMPLnOmegaStar(
@@ -807,7 +843,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         customLAMPPhenomenologicalA13(6, beta))) * scale;
 }
 
-@nogc double customLAMPPhenomenologicalNI(double T, int neutralSpecies, int ionSpecies, bool omega22)
+@nogc number customLAMPPhenomenologicalNI(number T, int neutralSpecies, int ionSpecies, bool omega22)
 {
     double alphaNeutral = customLAMPLaricchiutaPolarizability(neutralSpecies);
     double alphaIon = customLAMPLaricchiutaPolarizability(ionSpecies);
@@ -816,7 +852,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     double re = 1.767 * (pow(alphaNeutral, 1.0 / 3.0) + pow(alphaIon, 1.0 / 3.0))
         / pow(alphaNeutral * alphaIon * (1.0 + 1.0 / rho), 9.5e-2);
     double eps0 = 5.2e0 * alphaNeutral / pow(re, 4.0) * (1.0 + rho);
-    double x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
+    number x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
     double x0 = 7.564000e-1 * pow(beta, 6.460500e-2);
     double scale = pow(x0 * re, 2.0) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
     double a1 = omega22 ? customLAMPPhenomenologicalNI_A22(0, beta) : customLAMPPhenomenologicalNI_A11(0, beta);
@@ -829,7 +865,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     return exp(customLAMPLnOmegaStar(x, a1, a2, a3, a4, a5, a6, a7)) * scale;
 }
 
-@nogc double customLAMPPhenomenologicalNIByOrder(double T, int neutralSpecies, int ionSpecies, int order)
+@nogc number customLAMPPhenomenologicalNIByOrder(number T, int neutralSpecies, int ionSpecies, int order)
 {
     double alphaNeutral = customLAMPLaricchiutaPolarizability(neutralSpecies);
     double alphaIon = customLAMPLaricchiutaPolarizability(ionSpecies);
@@ -838,7 +874,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     double re = 1.767 * (pow(alphaNeutral, 1.0 / 3.0) + pow(alphaIon, 1.0 / 3.0))
         / pow(alphaNeutral * alphaIon * (1.0 + 1.0 / rho), 9.5e-2);
     double eps0 = 5.2e0 * alphaNeutral / pow(re, 4.0) * (1.0 + rho);
-    double x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
+    number x = log(CUSTOM_LAMP_KB * T / (eps0 * CUSTOM_LAMP_EC));
     double x0 = 7.564000e-1 * pow(beta, 6.460500e-2);
     double scale = pow(x0 * re, 2.0) * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
     double a1, a2, a3, a4, a5, a6, a7;
@@ -862,33 +898,33 @@ int customLAMPLampSpeciesIndex(string speciesName)
     return exp(customLAMPLnOmegaStar(x, a1, a2, a3, a4, a5, a6, a7)) * scale;
 }
 
-@nogc double customLAMPScaledPairOmega11(double T, int neutralSpeciesIndex)
+@nogc number customLAMPScaledPairOmega11(number T, int neutralSpeciesIndex)
 {
     return 425.4 * sqrt(customLAMPScaledIonNeutralPolarizability(neutralSpeciesIndex) / T)
         * CUSTOM_LAMP_CS * CUSTOM_LAMP_PI;
 }
 
-@nogc double customLAMPScaledPairOmega22(double T, int neutralSpeciesIndex)
+@nogc number customLAMPScaledPairOmega22(number T, int neutralSpeciesIndex)
 {
     return 0.8710 * customLAMPScaledPairOmega11(T, neutralSpeciesIndex);
 }
 
-@nogc double customLAMPScaledPairOmega12(double T, int neutralSpeciesIndex)
+@nogc number customLAMPScaledPairOmega12(number T, int neutralSpeciesIndex)
 {
     return 0.8333 * customLAMPScaledPairOmega11(T, neutralSpeciesIndex);
 }
 
-@nogc double customLAMPScaledPairOmega13(double T, int neutralSpeciesIndex)
+@nogc number customLAMPScaledPairOmega13(number T, int neutralSpeciesIndex)
 {
     return 0.7292 * customLAMPScaledPairOmega11(T, neutralSpeciesIndex);
 }
 
-@nogc double customLAMPElectronNeutralOmega(
-    double Te,
+@nogc number customLAMPElectronNeutralOmega(
+    number Te,
     int neutralSpeciesIndex,
     int order)
 {
-    double lnTe = log(Te);
+    number lnTe = log(Te);
     if (neutralSpeciesIndex == 0) {
         if (order == 11) return customLAMPEqA2(lnTe, 4.4763e0, 8.9123e0, 8.6558e1, -1.1907e1, 7.3977e-1, 8.1569e-2, 1.7704e0, 9.2013e0, 8.0978e-1);
         if (order == 12) return customLAMPEqA2(lnTe, 6.2997e0, 2.8143e0, 6.0373e0, -6.1715e-7, 5.9733e0, -1.3242e-1, 2.1061e0, 8.9217e0, 7.2869e-1);
@@ -925,15 +961,15 @@ int customLAMPLampSpeciesIndex(string speciesName)
         if (order == 15) return customLAMPEqA2(lnTe, 5.8041e-1, 1.3987e1, 3.9144e2, -9.7881e1, 7.0323e-1, 2.8223e-1, 1.3560e0, 7.9087e0, 7.8024e-1);
         if (order == 22) return customLAMPEqA2(lnTe, 3.8989e-2, 1.4692e1, 6.6332e2, -1.6621e2, 5.9703e-1, 1.9528e-1, 1.0178e0, 8.6724e0, 9.6611e-1);
     }
-    return 0.0;
+    return customLAMPNumberFromDouble(0.0);
 }
 
-@nogc double customLAMPElectronNeutralOmega11(double Te, int neutralSpeciesIndex)
+@nogc number customLAMPElectronNeutralOmega11(number Te, int neutralSpeciesIndex)
 {
     return customLAMPElectronNeutralOmega(Te, neutralSpeciesIndex, 11);
 }
 
-@nogc double customLAMPEmpiricalNeutralOmega11(double T, int speciesI, int speciesJ)
+@nogc number customLAMPEmpiricalNeutralOmega11(number T, int speciesI, int speciesJ)
 {
     int i = speciesI < speciesJ ? speciesI : speciesJ;
     int j = speciesI < speciesJ ? speciesJ : speciesI;
@@ -947,7 +983,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral pair");
 }
 
-@nogc double customLAMPEmpiricalNeutralOmega22(double T, int speciesI, int speciesJ)
+@nogc number customLAMPEmpiricalNeutralOmega22(number T, int speciesI, int speciesJ)
 {
     int i = speciesI < speciesJ ? speciesI : speciesJ;
     int j = speciesI < speciesJ ? speciesJ : speciesI;
@@ -961,7 +997,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral pair");
 }
 
-@nogc double customLAMPEmpiricalNeutralOmega12(double T, int speciesI, int speciesJ)
+@nogc number customLAMPEmpiricalNeutralOmega12(number T, int speciesI, int speciesJ)
 {
     int i = speciesI < speciesJ ? speciesI : speciesJ;
     int j = speciesI < speciesJ ? speciesJ : speciesI;
@@ -975,7 +1011,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral pair");
 }
 
-@nogc double customLAMPEmpiricalNeutralOmega13(double T, int speciesI, int speciesJ)
+@nogc number customLAMPEmpiricalNeutralOmega13(number T, int speciesI, int speciesJ)
 {
     int i = speciesI < speciesJ ? speciesI : speciesJ;
     int j = speciesI < speciesJ ? speciesJ : speciesI;
@@ -989,7 +1025,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral pair");
 }
 
-@nogc double customLAMPEmpiricalIonNeutralOmega11(double T, int neutralSpecies, int ionSpecies)
+@nogc number customLAMPEmpiricalIonNeutralOmega11(number T, int neutralSpecies, int ionSpecies)
 {
     if (neutralSpecies == 0 && ionSpecies == 7) return customLAMPEqA1(T, -1.5707e2, 1.6358e2, -1.5782e-3, 4.6818e-2, 3.7122e-2, 5.8367e-2);
     if (neutralSpecies == 1 && ionSpecies == 8) return customLAMPEqA1(T, -1.1575e2, 3.7386e2, -4.8436e-2, 3.6486e0, 2.6117e-1, 1.4145e-1);
@@ -999,7 +1035,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral-ion pair");
 }
 
-@nogc double customLAMPEmpiricalIonNeutralOmega12(double T, int neutralSpecies, int ionSpecies)
+@nogc number customLAMPEmpiricalIonNeutralOmega12(number T, int neutralSpecies, int ionSpecies)
 {
     if (neutralSpecies == 0 && ionSpecies == 7) return customLAMPEqA1(T, -1.5988e2, 1.6168e2, -4.4121e-4, 1.2796e-2, 1.0896e-2, 5.7820e-2);
     if (neutralSpecies == 1 && ionSpecies == 8) return customLAMPEqA1(T, -2.5560e2, 2.7178e2, -2.8455e-3, 1.4886e-1, 1.0396e-1, 7.4847e-2);
@@ -1009,7 +1045,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral-ion pair");
 }
 
-@nogc double customLAMPEmpiricalIonNeutralOmega13(double T, int neutralSpecies, int ionSpecies)
+@nogc number customLAMPEmpiricalIonNeutralOmega13(number T, int neutralSpecies, int ionSpecies)
 {
     if (neutralSpecies == 0 && ionSpecies == 7) return customLAMPEqA1(T, -1.5655e2, 1.6306e2, -1.6250e-3, 4.7258e-2, 3.9996e-2, 5.7329e-2);
     if (neutralSpecies == 1 && ionSpecies == 8) return customLAMPEqA1(T, -2.0496e2, 5.3410e2, -4.3204e-2, 4.7254e0, 5.0113e-1, 1.1552e-1);
@@ -1019,7 +1055,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral-ion pair");
 }
 
-@nogc double customLAMPEmpiricalIonNeutralOmega22(double T, int neutralSpecies, int ionSpecies)
+@nogc number customLAMPEmpiricalIonNeutralOmega22(number T, int neutralSpecies, int ionSpecies)
 {
     if (neutralSpecies == 0 && ionSpecies == 7) return customLAMPEqA1(T, -6.1066e1, 1.0830e2, 1.6620e-5, 1.9752e-4, 9.6025e-2, 5.0012e-1);
     if (neutralSpecies == 1 && ionSpecies == 8) return customLAMPEqA1(T, 1.4651e3, 4.5141e2, -4.7817e-1, 1.0000e0, 3.1366e0, 4.9971e-1);
@@ -1029,46 +1065,46 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP empirical neutral-ion pair");
 }
 
-@nogc double customLAMPNONOpOmega11(double T)
+@nogc number customLAMPNONOpOmega11(number T)
 {
     return customLAMPEqA1(T, -8.1007e2, 8.1015e2, -4.6391e-6, 7.5318e-4, 5.5734e-4, 7.3176e-2);
 }
 
-@nogc double customLAMPCoulombScreenedLogTerm(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombScreenedLogTerm(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ,
-    out double rhoPerp)
+    out number rhoPerp)
 {
     double massI = customLAMPSpeciesMass(lampI);
     double massJ = customLAMPSpeciesMass(lampJ);
     double reducedMass = massI * massJ / (massI + massJ);
-    double debyeLength = sqrt(CUSTOM_LAMP_EPS0 * CUSTOM_LAMP_KB * debyeTemperature
+    number debyeLength = sqrt(CUSTOM_LAMP_EPS0 * CUSTOM_LAMP_KB * debyeTemperature
         / (CUSTOM_LAMP_EC * CUSTOM_LAMP_EC * electronDensity));
-    double thermalRelativeSpeedSq = 2.0 * CUSTOM_LAMP_KB * screeningTemperature / reducedMass;
-    double thermalRelativeSpeed = sqrt(thermalRelativeSpeedSq);
-    double lambdaDeBroglie = CUSTOM_LAMP_H / (4.0 * CUSTOM_LAMP_PI * reducedMass * thermalRelativeSpeed);
+    number thermalRelativeSpeedSq = 2.0 * CUSTOM_LAMP_KB * screeningTemperature / reducedMass;
+    number thermalRelativeSpeed = sqrt(thermalRelativeSpeedSq);
+    number lambdaDeBroglie = CUSTOM_LAMP_H / (4.0 * CUSTOM_LAMP_PI * reducedMass * thermalRelativeSpeed);
     rhoPerp = abs(customLAMPCharge(lampI) * customLAMPCharge(lampJ))
         * CUSTOM_LAMP_EC * CUSTOM_LAMP_EC
         / (4.0 * CUSTOM_LAMP_PI * CUSTOM_LAMP_EPS0 * reducedMass * thermalRelativeSpeedSq);
-    double ionSphereRadius = pow(3.0 / (4.0 * CUSTOM_LAMP_PI * electronDensity), 1.0 / 3.0);
-    double bMin = sqrt(lambdaDeBroglie * lambdaDeBroglie + rhoPerp * rhoPerp);
-    double bMax = sqrt(debyeLength * debyeLength + ionSphereRadius * ionSphereRadius);
+    number ionSphereRadius = pow(3.0 / (4.0 * CUSTOM_LAMP_PI * electronDensity), 1.0 / 3.0);
+    number bMin = sqrt(lambdaDeBroglie * lambdaDeBroglie + rhoPerp * rhoPerp);
+    number bMax = sqrt(debyeLength * debyeLength + ionSphereRadius * ionSphereRadius);
     return 0.5 * log(1.0 + (bMax * bMax) / (bMin * bMin))
         + log(2.0) - 2.0 * CUSTOM_LAMP_EULER_GAMMA;
 }
 
-@nogc double customLAMPCoulombOmega11(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega11(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega1sFromLog(1, screenedLogTerm, rhoPerp);
 }
@@ -1080,105 +1116,105 @@ int customLAMPLampSpeciesIndex(string speciesName)
     return result;
 }
 
-@nogc double customLAMPCoulombOmega1sFromLog(int order, double screenedLogTerm, double rhoPerp)
+@nogc number customLAMPCoulombOmega1sFromLog(int order, number screenedLogTerm, number rhoPerp)
 {
     return CUSTOM_LAMP_PI * 4.0 / (to!double(order) * to!double(order + 1))
         * rhoPerp * rhoPerp * (screenedLogTerm + customLAMPCoulombPsi(order) - 0.5);
 }
 
-@nogc double customLAMPCoulombOmega12(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega12(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega1sFromLog(2, screenedLogTerm, rhoPerp);
 }
 
-@nogc double customLAMPCoulombOmega13(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega13(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega1sFromLog(3, screenedLogTerm, rhoPerp);
 }
 
-@nogc double customLAMPCoulombOmega14(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega14(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega1sFromLog(4, screenedLogTerm, rhoPerp);
 }
 
-@nogc double customLAMPCoulombOmega15(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega15(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega1sFromLog(5, screenedLogTerm, rhoPerp);
 }
 
-@nogc double customLAMPCoulombOmega2sFromLog(int order, double screenedLogTerm, double rhoPerp)
+@nogc number customLAMPCoulombOmega2sFromLog(int order, number screenedLogTerm, number rhoPerp)
 {
     return CUSTOM_LAMP_PI * 12.0 / (to!double(order) * to!double(order + 1))
         * rhoPerp * rhoPerp * (screenedLogTerm + customLAMPCoulombPsi(order) - 1.0);
 }
 
-@nogc double customLAMPCoulombOmega22(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega22(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return CUSTOM_LAMP_PI * 2.0 * rhoPerp * rhoPerp * screenedLogTerm;
 }
 
-@nogc double customLAMPCoulombOmega23(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega23(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega2sFromLog(3, screenedLogTerm, rhoPerp);
 }
 
-@nogc double customLAMPCoulombOmega24(
-    double screeningTemperature,
-    double debyeTemperature,
-    double electronDensity,
+@nogc number customLAMPCoulombOmega24(
+    number screeningTemperature,
+    number debyeTemperature,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
-    double rhoPerp;
-    double screenedLogTerm = customLAMPCoulombScreenedLogTerm(
+    number rhoPerp;
+    number screenedLogTerm = customLAMPCoulombScreenedLogTerm(
         screeningTemperature, debyeTemperature, electronDensity, lampI, lampJ, rhoPerp);
     return customLAMPCoulombOmega2sFromLog(4, screenedLogTerm, rhoPerp);
 }
@@ -1205,7 +1241,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
         || (neutralSpecies == 3 && ionSpecies == 5);
 }
 
-@nogc double customLAMPCollisionOmega11(double Th, double Te, double electronDensity, int lampI, int lampJ)
+@nogc number customLAMPCollisionOmega11(number Th, number Te, number electronDensity, int lampI, int lampJ)
 {
     int i = lampI < lampJ ? lampI : lampJ;
     int j = lampI < lampJ ? lampJ : lampI;
@@ -1232,7 +1268,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP collision pair");
 }
 
-@nogc double customLAMPCollisionOmega22(double Th, double Te, double electronDensity, int lampI, int lampJ)
+@nogc number customLAMPCollisionOmega22(number Th, number Te, number electronDensity, int lampI, int lampJ)
 {
     int i = lampI < lampJ ? lampI : lampJ;
     int j = lampI < lampJ ? lampJ : lampI;
@@ -1259,7 +1295,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP collision pair");
 }
 
-@nogc double customLAMPCollisionOmega12(double Th, double Te, double electronDensity, int lampI, int lampJ)
+@nogc number customLAMPCollisionOmega12(number Th, number Te, number electronDensity, int lampI, int lampJ)
 {
     int i = lampI < lampJ ? lampI : lampJ;
     int j = lampI < lampJ ? lampJ : lampI;
@@ -1286,7 +1322,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP collision pair");
 }
 
-@nogc double customLAMPCollisionOmega13(double Th, double Te, double electronDensity, int lampI, int lampJ)
+@nogc number customLAMPCollisionOmega13(number Th, number Te, number electronDensity, int lampI, int lampJ)
 {
     int i = lampI < lampJ ? lampI : lampJ;
     int j = lampI < lampJ ? lampJ : lampI;
@@ -1313,7 +1349,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("unsupported CustomLAMP collision pair");
 }
 
-@nogc double customLAMPCollisionOmega14(double Th, double Te, double electronDensity, int lampI, int lampJ)
+@nogc number customLAMPCollisionOmega14(number Th, number Te, number electronDensity, int lampI, int lampJ)
 {
     int i = lampI < lampJ ? lampI : lampJ;
     int j = lampI < lampJ ? lampJ : lampI;
@@ -1324,7 +1360,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("CustomLAMP Omega14 is only used for electron pairs");
 }
 
-@nogc double customLAMPCollisionOmega15(double Th, double Te, double electronDensity, int lampI, int lampJ)
+@nogc number customLAMPCollisionOmega15(number Th, number Te, number electronDensity, int lampI, int lampJ)
 {
     int i = lampI < lampJ ? lampI : lampJ;
     int j = lampI < lampJ ? lampJ : lampI;
@@ -1335,36 +1371,34 @@ int customLAMPLampSpeciesIndex(string speciesName)
     throw new Error("CustomLAMP Omega15 is only used for electron pairs");
 }
 
-@nogc double customLAMPSpeciesTemperature(ref const(GasState) gs, int lampIndex)
+@nogc number customLAMPSpeciesTemperature(ref const(GasState) gs, int lampIndex)
 {
-    return lampIndex == 10 ? customLAMPReal(gs.T_modes[0]) : customLAMPReal(gs.T);
+    return lampIndex == 10 ? gs.T_modes[0] : gs.T;
 }
 
 @nogc number customLAMPBinaryDiffusion(
     ref const(GasState) gs,
-    double totalNumberDensity,
-    double electronDensity,
+    number totalNumberDensity,
+    number electronDensity,
     int lampI,
     int lampJ)
 {
     double massI = customLAMPSpeciesMass(lampI);
     double massJ = customLAMPSpeciesMass(lampJ);
-    double Ti = customLAMPSpeciesTemperature(gs, lampI);
-    double Tj = customLAMPSpeciesTemperature(gs, lampJ);
-    double Th = customLAMPReal(gs.T);
-    double Te = customLAMPReal(gs.T_modes[0]);
-    double omega11 = customLAMPCollisionOmega11(Th, Te, electronDensity, lampI, lampJ);
-    if (omega11 <= 0.0) throw new Error("CustomLAMP collision integral must be positive");
+    number Ti = customLAMPSpeciesTemperature(gs, lampI);
+    number Tj = customLAMPSpeciesTemperature(gs, lampJ);
+    number Th = gs.T;
+    number Te = gs.T_modes[0];
+    number omega11 = customLAMPCollisionOmega11(Th, Te, electronDensity, lampI, lampJ);
+    if (customLAMPReal(omega11) <= 0.0) throw new Error("CustomLAMP collision integral must be positive");
     double reducedMass = massI * massJ / (massI + massJ);
-    double effectiveTemperature = 1.0 / ((massI / Tj + massJ / Ti) / (massI + massJ));
-    double thetaJI = Tj / Ti;
-    double gIJ = pow(massJ + massI * thetaJI, 2.0)
+    number effectiveTemperature = 1.0 / ((massI / Tj + massJ / Ti) / (massI + massJ));
+    number thetaJI = Tj / Ti;
+    number gIJ = pow(massJ + massI * thetaJI, 2.0)
         * pow(massI + massJ * thetaJI, 3.0)
         / (pow(thetaJI, 2.5) * pow(massI + massJ, 5.0));
-    return customLAMPNumberFromDouble(
-        3.0 * Ti * gIJ / (16.0 * totalNumberDensity * omega11)
-        * sqrt(2.0 * CUSTOM_LAMP_PI * CUSTOM_LAMP_KB / (reducedMass * effectiveTemperature))
-    );
+    return 3.0 * Ti * gIJ / (16.0 * totalNumberDensity * omega11)
+        * sqrt(2.0 * CUSTOM_LAMP_PI * CUSTOM_LAMP_KB / (reducedMass * effectiveTemperature));
 }
 
 @nogc void customLAMPCopyHeavyNumberDensities(ref const(number[]) lampNumberDensities, ref number[] heavyNumberDensities)
@@ -1377,7 +1411,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
 
 @nogc void customLAMPBuildHeavyCollisionMatrices(
     ref const(GasState) gs,
-    double electronDensity,
+    number electronDensity,
     ref number[][] collision11,
     ref number[][] collision12,
     ref number[][] collision13,
@@ -1389,8 +1423,8 @@ int customLAMPLampSpeciesIndex(string speciesName)
         assert(collision13.length == CUSTOM_LAMP_HEAVY_SPECIES);
         assert(collision22.length == CUSTOM_LAMP_HEAVY_SPECIES);
     }
-    double Th = customLAMPReal(gs.T);
-    double Te = customLAMPReal(gs.T_modes[0]);
+    number Th = gs.T;
+    number Te = gs.T_modes[0];
     foreach (i; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) {
         foreach (j; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) {
             collision11[i][j] = customLAMPCollisionOmega11(Th, Te, electronDensity, to!int(i), to!int(j));
@@ -1402,7 +1436,6 @@ int customLAMPLampSpeciesIndex(string speciesName)
 }
 
 @nogc void customLAMPBuildViscositySystem(
-    double heavyTemperature,
     ref const(number[]) zfHeavy,
     ref const(number[][]) collision11,
     ref const(number[][]) collision22,
@@ -1443,9 +1476,9 @@ int customLAMPLampSpeciesIndex(string speciesName)
     foreach (row; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) pivots[row] = to!int(row);
     foreach (col; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) {
         size_t pivotRow = col;
-        number pivotAbs = abs(values[col][col]);
+        double pivotAbs = customLAMPPivotMetric(values[col][col]);
         foreach (row; col + 1 .. CUSTOM_LAMP_HEAVY_SPECIES) {
-            number candidateAbs = abs(values[row][col]);
+            double candidateAbs = customLAMPPivotMetric(values[row][col]);
             if (candidateAbs > pivotAbs) {
                 pivotAbs = candidateAbs;
                 pivotRow = row;
@@ -1462,7 +1495,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
             pivots[pivotRow] = tmpPivot;
         }
         number pivot = values[col][col];
-        if (abs(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) continue;
+        if (customLAMPPivotMetric(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) continue;
         foreach (row; col + 1 .. CUSTOM_LAMP_HEAVY_SPECIES) {
             values[row][col] /= pivot;
             number multiplier = values[row][col];
@@ -1495,7 +1528,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
             acc -= lu[row][col] * solution[col];
         }
         number pivot = lu[row][row];
-        if (abs(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) {
+        if (customLAMPPivotMetric(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) {
             throw new Error("singular matrix in CustomLAMP viscosity solve");
         }
         solution[row] = acc / pivot;
@@ -1538,19 +1571,20 @@ int customLAMPLampSpeciesIndex(string speciesName)
     ref number[] scratch,
     ref number[] solution)
 {
-    customLAMPBuildViscositySystem(customLAMPReal(gs.T), heavyNumberDensities, collision11, collision22, core, borderCol, borderRow);
+    customLAMPBuildViscositySystem(heavyNumberDensities, collision11, collision22, core, borderCol, borderRow);
     number ratio = customLAMPBorderedDeterminantRatio(core, borderCol, borderRow, lu, pivots, scratch, solution);
     return -2.5 * sqrt(2.0 * CUSTOM_LAMP_PI * CUSTOM_LAMP_KB) * sqrt(gs.T) * ratio;
 }
 
-@nogc void customLAMPLUFactorInPlaceN(ref number[][] values, ref int[] pivots, int size)
+@nogc double customLAMPLUFactorInPlaceN(ref number[][] values, ref int[] pivots, int size)
 {
     foreach (row; 0 .. size) pivots[row] = row;
+    double parity = 1.0;
     foreach (col; 0 .. size) {
         int pivotRow = col;
-        number pivotAbs = abs(values[col][col]);
+        double pivotAbs = customLAMPPivotMetric(values[col][col]);
         foreach (row; col + 1 .. size) {
-            number candidateAbs = abs(values[row][col]);
+            double candidateAbs = customLAMPPivotMetric(values[row][col]);
             if (candidateAbs > pivotAbs) {
                 pivotAbs = candidateAbs;
                 pivotRow = row;
@@ -1565,9 +1599,10 @@ int customLAMPLampSpeciesIndex(string speciesName)
             int tmpPivot = pivots[col];
             pivots[col] = pivots[pivotRow];
             pivots[pivotRow] = tmpPivot;
+            parity = -parity;
         }
         number pivot = values[col][col];
-        if (abs(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) continue;
+        if (customLAMPPivotMetric(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) continue;
         foreach (row; col + 1 .. size) {
             values[row][col] /= pivot;
             number multiplier = values[row][col];
@@ -1577,6 +1612,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
             }
         }
     }
+    return parity;
 }
 
 @nogc void customLAMPSolveLUN(
@@ -1602,7 +1638,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
             acc -= lu[row][col] * solution[col];
         }
         number pivot = lu[row][row];
-        if (abs(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) {
+        if (customLAMPPivotMetric(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) {
             throw new Error("singular matrix in CustomLAMP thermal-conductivity solve");
         }
         solution[row] = acc / pivot;
@@ -1617,20 +1653,203 @@ int customLAMPLampSpeciesIndex(string speciesName)
     ref int[] pivots,
     ref number[] scratch,
     ref number[] solution,
-    int size)
+    int size,
+    double scale)
 {
     foreach (row; 0 .. size) {
         foreach (col; 0 .. size) {
-            lu[row][col] = core[row][col];
+            lu[row][col] = core[row][col] * scale;
         }
     }
     customLAMPLUFactorInPlaceN(lu, pivots, size);
-    customLAMPSolveLUN(lu, pivots, borderCol, scratch, solution, size);
+    foreach (row; 0 .. size) {
+        scratch[row] = borderCol[pivots[row]] * scale;
+        solution[row] = 0.0;
+    }
+    foreach (row; 0 .. size) {
+        foreach (col; 0 .. row) {
+            scratch[row] -= lu[row][col] * scratch[col];
+        }
+    }
+    foreach_reverse (row; 0 .. size) {
+        number acc = scratch[row];
+        foreach (col; row + 1 .. size) {
+            acc -= lu[row][col] * solution[col];
+        }
+        number pivot = lu[row][row];
+        if (customLAMPPivotMetric(pivot) <= CUSTOM_LAMP_PIVOT_FLOOR) {
+            throw new Error("singular matrix in CustomLAMP thermal-conductivity solve");
+        }
+        solution[row] = acc / pivot;
+    }
     number dot = 0.0;
     foreach (index; 0 .. size) {
-        dot += borderRow[index] * solution[index];
+        dot += borderRow[index] * scale * solution[index];
     }
     return -dot;
+}
+
+@nogc bool customLAMPDeterminantUnitAndLogAbsFromLU(
+    ref number[][] lu,
+    ref int[] pivots,
+    int size,
+    ref number determinantUnit,
+    ref double logAbs)
+{
+    pragma(inline, false);
+    double parity = customLAMPLUFactorInPlaceN(lu, pivots, size);
+    determinantUnit = customLAMPNumberFromDouble(parity);
+    logAbs = 0.0;
+    foreach (row; 0 .. size) {
+        number pivot = lu[row][row];
+        double pivotAbs = customLAMPPivotMetric(pivot);
+        if (pivotAbs <= CUSTOM_LAMP_PIVOT_FLOOR) {
+            determinantUnit = customLAMPNumberFromDouble(0.0);
+            logAbs = -double.max;
+            return false;
+        }
+        determinantUnit *= pivot / customLAMPNumberFromDouble(pivotAbs);
+        logAbs += log(pivotAbs);
+    }
+    return true;
+}
+
+@nogc bool customLAMPDeterminantUnitAndLogAbsN(
+    ref const(number[][]) values,
+    ref number[][] lu,
+    ref int[] pivots,
+    int size,
+    double scale,
+    ref number determinantUnit,
+    ref double logAbs)
+{
+    pragma(inline, false);
+    foreach (row; 0 .. size) {
+        foreach (col; 0 .. size) {
+            lu[row][col] = values[row][col] * scale;
+        }
+    }
+    return customLAMPDeterminantUnitAndLogAbsFromLU(lu, pivots, size, determinantUnit, logAbs);
+}
+
+@nogc bool customLAMPBorderedDeterminantUnitAndLogAbsN(
+    ref const(number[][]) core,
+    ref const(number[]) borderCol,
+    ref const(number[]) borderRow,
+    ref number[][] lu,
+    ref int[] pivots,
+    int size,
+    double scale,
+    ref number determinantUnit,
+    ref double logAbs)
+{
+    pragma(inline, false);
+    int borderedSize = size + 1;
+    foreach (row; 0 .. borderedSize) {
+        foreach (col; 0 .. borderedSize) {
+            lu[row][col] = 0.0;
+        }
+    }
+    foreach (row; 0 .. size) {
+        foreach (col; 0 .. size) {
+            lu[row][col] = core[row][col] * scale;
+        }
+        lu[row][size] = borderCol[row] * scale;
+        lu[size][row] = borderRow[row] * scale;
+    }
+    return customLAMPDeterminantUnitAndLogAbsFromLU(
+        lu, pivots, borderedSize, determinantUnit, logAbs
+    );
+}
+
+@nogc number customLAMPThermalBorderedDeterminantRatioN(
+    ref const(number[][]) core,
+    ref const(number[]) borderCol,
+    ref const(number[]) borderRow,
+    ref number[][] lu,
+    ref number[][] borderedLU,
+    ref int[] pivots,
+    ref int[] borderedPivots,
+    ref number[] scratch,
+    ref number[] solution,
+    int size)
+{
+    pragma(inline, false);
+    number coreDetUnit = 0.0;
+    double coreLogAbs = 0.0;
+    bool coreOk = customLAMPDeterminantUnitAndLogAbsN(
+        core,
+        lu,
+        pivots,
+        size,
+        CUSTOM_LAMP_BHK_SCALE,
+        coreDetUnit,
+        coreLogAbs
+    );
+    if (!coreOk || coreLogAbs < CUSTOM_LAMP_HTHC_DENOM_FLOOR_LOG) {
+        number borderedDetUnit = 0.0;
+        double borderedLogAbs = 0.0;
+        bool borderedOk = customLAMPBorderedDeterminantUnitAndLogAbsN(
+            core,
+            borderCol,
+            borderRow,
+            borderedLU,
+            borderedPivots,
+            size,
+            CUSTOM_LAMP_BHK_SCALE,
+            borderedDetUnit,
+            borderedLogAbs
+        );
+        if (!borderedOk) return customLAMPNumberFromDouble(0.0);
+        number expTerm = exp(borderedLogAbs - CUSTOM_LAMP_HTHC_DENOM_FLOOR_LOG);
+        number fallbackRatio = borderedDetUnit
+            * expTerm
+            / CUSTOM_LAMP_BHK_SCALE;
+        if (!customLAMPFiniteNumber(expTerm) || !customLAMPFiniteNumber(fallbackRatio)) {
+            printf(
+                "CUSTOM_LAMP_TRANSPORT_DIAG: non-finite thermal-ratio-fallback coreOk=%d coreLogAbs=%.16e borderedOk=%d borderedLogAbs=%.16e expTerm=%.16e%+.16ei coreUnit=%.16e%+.16ei borderedUnit=%.16e%+.16ei ratio=%.16e%+.16ei\n",
+                coreOk ? 1 : 0,
+                coreLogAbs,
+                borderedOk ? 1 : 0,
+                borderedLogAbs,
+                customLAMPReal(expTerm),
+                customLAMPImag(expTerm),
+                customLAMPReal(coreDetUnit),
+                customLAMPImag(coreDetUnit),
+                customLAMPReal(borderedDetUnit),
+                customLAMPImag(borderedDetUnit),
+                customLAMPReal(fallbackRatio),
+                customLAMPImag(fallbackRatio)
+            );
+        }
+        return fallbackRatio;
+    }
+    number scaledRatio = customLAMPBorderedDeterminantRatioN(
+        core,
+        borderCol,
+        borderRow,
+        lu,
+        pivots,
+        scratch,
+        solution,
+        size,
+        CUSTOM_LAMP_BHK_SCALE
+    );
+    number ratio = scaledRatio / CUSTOM_LAMP_BHK_SCALE;
+    if (!customLAMPFiniteNumber(scaledRatio) || !customLAMPFiniteNumber(ratio)) {
+        printf(
+            "CUSTOM_LAMP_TRANSPORT_DIAG: non-finite thermal-ratio-normal coreOk=%d coreLogAbs=%.16e coreUnit=%.16e%+.16ei scaledRatio=%.16e%+.16ei ratio=%.16e%+.16ei\n",
+            coreOk ? 1 : 0,
+            coreLogAbs,
+            customLAMPReal(coreDetUnit),
+            customLAMPImag(coreDetUnit),
+            customLAMPReal(scaledRatio),
+            customLAMPImag(scaledRatio),
+            customLAMPReal(ratio),
+            customLAMPImag(ratio)
+        );
+    }
+    return ratio;
 }
 
 @nogc void customLAMPBuildHeavyThermalSystem(
@@ -1713,10 +1932,13 @@ int customLAMPLampSpeciesIndex(string speciesName)
     ref number[] borderCol,
     ref number[] borderRow,
     ref number[][] lu,
+    ref number[][] borderedLU,
     ref int[] pivots,
+    ref int[] borderedPivots,
     ref number[] scratch,
     ref number[] solution)
 {
+    pragma(inline, false);
     customLAMPBuildHeavyThermalSystem(
         heavyNumberDensities,
         collision11,
@@ -1727,24 +1949,85 @@ int customLAMPLampSpeciesIndex(string speciesName)
         borderCol,
         borderRow
     );
-    number ratio = customLAMPBorderedDeterminantRatioN(
+    number ratio = customLAMPThermalBorderedDeterminantRatioN(
         core,
         borderCol,
         borderRow,
         lu,
+        borderedLU,
         pivots,
+        borderedPivots,
         scratch,
         solution,
         CUSTOM_LAMP_THERMAL_SYSTEM
     );
+    if (!customLAMPFiniteNumber(ratio)) {
+        printf(
+            "CUSTOM_LAMP_TRANSPORT_DIAG: non-finite heavy-trans-ratio T=%.16e%+.16ei ratio=%.16e%+.16ei\n",
+            customLAMPReal(gs.T),
+            customLAMPImag(gs.T),
+            customLAMPReal(ratio),
+            customLAMPImag(ratio)
+        );
+        printf(
+            "CUSTOM_LAMP_TRANSPORT_DIAG: heavy-number-densities N2=%.16e%+.16ei O2=%.16e%+.16ei N=%.16e%+.16ei O=%.16e%+.16ei NO=%.16e%+.16ei Np=%.16e%+.16ei Op=%.16e%+.16ei N2p=%.16e%+.16ei O2p=%.16e%+.16ei NOp=%.16e%+.16ei\n",
+            customLAMPReal(heavyNumberDensities[0]),
+            customLAMPImag(heavyNumberDensities[0]),
+            customLAMPReal(heavyNumberDensities[1]),
+            customLAMPImag(heavyNumberDensities[1]),
+            customLAMPReal(heavyNumberDensities[2]),
+            customLAMPImag(heavyNumberDensities[2]),
+            customLAMPReal(heavyNumberDensities[3]),
+            customLAMPImag(heavyNumberDensities[3]),
+            customLAMPReal(heavyNumberDensities[4]),
+            customLAMPImag(heavyNumberDensities[4]),
+            customLAMPReal(heavyNumberDensities[5]),
+            customLAMPImag(heavyNumberDensities[5]),
+            customLAMPReal(heavyNumberDensities[6]),
+            customLAMPImag(heavyNumberDensities[6]),
+            customLAMPReal(heavyNumberDensities[7]),
+            customLAMPImag(heavyNumberDensities[7]),
+            customLAMPReal(heavyNumberDensities[8]),
+            customLAMPImag(heavyNumberDensities[8]),
+            customLAMPReal(heavyNumberDensities[9]),
+            customLAMPImag(heavyNumberDensities[9])
+        );
+        throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite heavy-trans-ratio");
+    }
     number cht = -75.0 * CUSTOM_LAMP_KB * sqrt(2.0 * CUSTOM_LAMP_PI * CUSTOM_LAMP_KB) / 8.0;
-    return cht * sqrt(gs.T) * ratio;
+    number sqrtT = sqrt(gs.T);
+    if (!customLAMPFiniteNumber(sqrtT)) {
+        printf(
+            "CUSTOM_LAMP_TRANSPORT_DIAG: non-finite heavy-trans-sqrtT T=%.16e%+.16ei sqrtT=%.16e%+.16ei\n",
+            customLAMPReal(gs.T),
+            customLAMPImag(gs.T),
+            customLAMPReal(sqrtT),
+            customLAMPImag(sqrtT)
+        );
+        throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite heavy-trans-sqrtT");
+    }
+    number result = cht * sqrtT * ratio;
+    if (!customLAMPFiniteNumber(result)) {
+        printf(
+            "CUSTOM_LAMP_TRANSPORT_DIAG: non-finite heavy-trans-result T=%.16e%+.16ei sqrtT=%.16e%+.16ei ratio=%.16e%+.16ei result=%.16e%+.16ei\n",
+            customLAMPReal(gs.T),
+            customLAMPImag(gs.T),
+            customLAMPReal(sqrtT),
+            customLAMPImag(sqrtT),
+            customLAMPReal(ratio),
+            customLAMPImag(ratio),
+            customLAMPReal(result),
+            customLAMPImag(result)
+        );
+        throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite heavy-trans-result");
+    }
+    return result;
 }
 
 @nogc void customLAMPBuildHeavyBinaryDiffusion(
     ref const(GasState) gs,
-    double totalNumberDensity,
-    double electronDensity,
+    number totalNumberDensity,
+    number electronDensity,
     ref number[][] binaryDiffusion)
 {
     foreach (i; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) {
@@ -1771,7 +2054,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
 @nogc number customLAMPHeavyInternalRotationalThermalConductivity(
     ref const(GasState) gs,
     ref const(number[]) lampNumberDensities,
-    double totalNumberDensity,
+    number totalNumberDensity,
     ref const(number[][]) binaryDiffusion)
 {
     number conductivity = 0.0;
@@ -1797,20 +2080,20 @@ int customLAMPLampSpeciesIndex(string speciesName)
         || lampIndex == 7 || lampIndex == 8 || lampIndex == 9;
 }
 
-@nogc double customLAMPVibrationalModeEnthalpy(
-    double electronTemperature,
+@nogc number customLAMPVibrationalModeEnthalpy(
+    number electronTemperature,
     double waveNumberCm,
     double anharmonicityCm,
     double cutoffEnergyEv)
 {
-    double partitionSum = 0.0;
-    double energySum = 0.0;
+    number partitionSum = 0.0;
+    number energySum = 0.0;
     foreach (level; 0 .. 101) {
         double x = to!double(level) + 0.5;
         double vibrationalEnergyEv = (waveNumberCm * x - anharmonicityCm * x * x)
             * CUSTOM_LAMP_H / CUSTOM_LAMP_EV2J * (100.0 * CUSTOM_LAMP_C0);
         if (vibrationalEnergyEv < cutoffEnergyEv) {
-            double boltzmannFactor = exp(-vibrationalEnergyEv * CUSTOM_LAMP_EV2J
+            number boltzmannFactor = exp(-vibrationalEnergyEv * CUSTOM_LAMP_EV2J
                 / (CUSTOM_LAMP_KB * electronTemperature));
             partitionSum += boltzmannFactor;
             energySum += vibrationalEnergyEv * CUSTOM_LAMP_EV2J * boltzmannFactor;
@@ -1819,20 +2102,20 @@ int customLAMPLampSpeciesIndex(string speciesName)
     return energySum / partitionSum;
 }
 
-@nogc double customLAMPMolecularVibrationalEnthalpy(double heavyTemperature, int lampIndex)
+@nogc number customLAMPMolecularVibrationalEnthalpy(number heavyTemperature, int lampIndex)
 {
     final switch (lampIndex) {
     case 0: return customLAMPVibrationalModeEnthalpy(heavyTemperature, 2358.57, 14.324, 9.759);
     case 1: return customLAMPVibrationalModeEnthalpy(heavyTemperature, 1580.193, 11.981, 5.115);
-    case 2: return 0.0;
-    case 3: return 0.0;
+    case 2: return customLAMPNumberFromDouble(0.0);
+    case 3: return customLAMPNumberFromDouble(0.0);
     case 4: return customLAMPVibrationalModeEnthalpy(heavyTemperature, 1904.20, 14.075, 6.497);
-    case 5: return 0.0;
-    case 6: return 0.0;
+    case 5: return customLAMPNumberFromDouble(0.0);
+    case 6: return customLAMPNumberFromDouble(0.0);
     case 7: return customLAMPVibrationalModeEnthalpy(heavyTemperature, 2207.00, 16.10, 8.713);
     case 8: return customLAMPVibrationalModeEnthalpy(heavyTemperature, 1904.77, 16.259, 6.663);
     case 9: return customLAMPVibrationalModeEnthalpy(heavyTemperature, 2376.42, 16.262, 10.851);
-    case 10: return 0.0;
+    case 10: return customLAMPNumberFromDouble(0.0);
     }
 }
 
@@ -1992,14 +2275,14 @@ int customLAMPLampSpeciesIndex(string speciesName)
     return 0.0;
 }
 
-@nogc double customLAMPAtomicElectronicEnthalpy(double electronTemperature, int lampIndex)
+@nogc number customLAMPAtomicElectronicEnthalpy(number electronTemperature, int lampIndex)
 {
-    double partitionSum = 0.0;
-    double energySum = 0.0;
+    number partitionSum = 0.0;
+    number energySum = 0.0;
     foreach (level; 0 .. 15) {
         double energy = customLAMPAtomicElectronicLevelEnergy(lampIndex, to!int(level));
         double degeneracy = customLAMPAtomicElectronicLevelDegeneracy(lampIndex, to!int(level));
-        double boltzmannFactor = exp(-energy / (CUSTOM_LAMP_KB * electronTemperature));
+        number boltzmannFactor = exp(-energy / (CUSTOM_LAMP_KB * electronTemperature));
         partitionSum += degeneracy * boltzmannFactor;
         energySum += energy * degeneracy * boltzmannFactor;
     }
@@ -2015,21 +2298,21 @@ int customLAMPLampSpeciesIndex(string speciesName)
         assert(vibrationalHeatCapacity.length == CUSTOM_LAMP_HEAVY_SPECIES);
         assert(electronicHeatCapacity.length == CUSTOM_LAMP_HEAVY_SPECIES);
     }
-    double heavyTemperature = customLAMPReal(gs.T);
-    double electronTemperature = customLAMPReal(gs.T_modes[0]);
+    number heavyTemperature = gs.T;
+    number electronTemperature = gs.T_modes[0];
     foreach (species; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) {
         int lampIndex = to!int(species);
         vibrationalHeatCapacity[species] = 0.0;
         electronicHeatCapacity[species] = 0.0;
         double mass = customLAMPSpeciesMass(lampIndex);
         if (customLAMPIsMolecular(lampIndex)) {
-            double high = customLAMPMolecularVibrationalEnthalpy(heavyTemperature + 100.0, lampIndex) / mass;
-            double base = customLAMPMolecularVibrationalEnthalpy(heavyTemperature, lampIndex) / mass;
-            double modalHeatCapacity = fmax((high - base) / 100.0, 0.0);
+            number high = customLAMPMolecularVibrationalEnthalpy(heavyTemperature + 100.0, lampIndex) / mass;
+            number base = customLAMPMolecularVibrationalEnthalpy(heavyTemperature, lampIndex) / mass;
+            number modalHeatCapacity = fmax((high - base) / 100.0, 0.0);
             vibrationalHeatCapacity[species] = fmax(modalHeatCapacity - customLAMPRotationalHeatCapacity(lampIndex), 0.0);
         } else if (lampIndex == 2 || lampIndex == 3 || lampIndex == 5 || lampIndex == 6) {
-            double high = customLAMPAtomicElectronicEnthalpy(electronTemperature + 100.0, lampIndex) / mass;
-            double base = customLAMPAtomicElectronicEnthalpy(electronTemperature, lampIndex) / mass;
+            number high = customLAMPAtomicElectronicEnthalpy(electronTemperature + 100.0, lampIndex) / mass;
+            number base = customLAMPAtomicElectronicEnthalpy(electronTemperature, lampIndex) / mass;
             electronicHeatCapacity[species] = fmax((high - base) / 100.0, 0.0);
         }
     }
@@ -2038,7 +2321,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
 @nogc number customLAMPHeavyInternalThermalConductivityFromModalHeatCapacity(
     ref const(GasState) gs,
     ref const(number[]) lampNumberDensities,
-    double totalNumberDensity,
+    number totalNumberDensity,
     ref const(number[]) modalHeatCapacity,
     ref const(number[][]) binaryDiffusion)
 {
@@ -2062,7 +2345,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
 @nogc void customLAMPDevotoElectronQ(
     ref const(GasState) gs,
     ref const(number[]) lampNumberDensities,
-    double electronDensity,
+    number electronDensity,
     out number q11,
     out number q12,
     out number q22)
@@ -2070,14 +2353,14 @@ int customLAMPLampSpeciesIndex(string speciesName)
     q11 = 0.0;
     q12 = 0.0;
     q22 = 0.0;
-    double Th = customLAMPReal(gs.T);
-    double Te = customLAMPReal(gs.T_modes[0]);
+    number Th = gs.T;
+    number Te = gs.T_modes[0];
     foreach (species; 0 .. CUSTOM_LAMP_HEAVY_SPECIES) {
-        double omega11 = customLAMPCollisionOmega11(Th, Te, electronDensity, 10, to!int(species));
-        double omega12 = customLAMPCollisionOmega12(Th, Te, electronDensity, 10, to!int(species));
-        double omega13 = customLAMPCollisionOmega13(Th, Te, electronDensity, 10, to!int(species));
-        double omega14 = customLAMPCollisionOmega14(Th, Te, electronDensity, 10, to!int(species));
-        double omega15 = customLAMPCollisionOmega15(Th, Te, electronDensity, 10, to!int(species));
+        number omega11 = customLAMPCollisionOmega11(Th, Te, electronDensity, 10, to!int(species));
+        number omega12 = customLAMPCollisionOmega12(Th, Te, electronDensity, 10, to!int(species));
+        number omega13 = customLAMPCollisionOmega13(Th, Te, electronDensity, 10, to!int(species));
+        number omega14 = customLAMPCollisionOmega14(Th, Te, electronDensity, 10, to!int(species));
+        number omega15 = customLAMPCollisionOmega15(Th, Te, electronDensity, 10, to!int(species));
         q11 += lampNumberDensities[species] * (
             25.0 / 4.0 * omega11
             - 15.0 * omega12
@@ -2101,10 +2384,10 @@ int customLAMPLampSpeciesIndex(string speciesName)
     q12 *= 8.0 * electronDensity;
     q22 *= 8.0 * electronDensity;
 
-    double electronOmega22 = customLAMPCoulombOmega22(Te, Te, electronDensity, 10, 10);
-    double electronOmega23 = customLAMPCoulombOmega23(Te, Te, electronDensity, 10, 10);
-    double electronOmega24 = customLAMPCoulombOmega24(Te, Te, electronDensity, 10, 10);
-    double eePrefactor = 8.0 * sqrt(2.0) * electronDensity * electronDensity;
+    number electronOmega22 = customLAMPCoulombOmega22(Te, Te, electronDensity, 10, 10);
+    number electronOmega23 = customLAMPCoulombOmega23(Te, Te, electronDensity, 10, 10);
+    number electronOmega24 = customLAMPCoulombOmega24(Te, Te, electronDensity, 10, 10);
+    number eePrefactor = 8.0 * sqrt(2.0) * electronDensity * electronDensity;
     q11 += eePrefactor * electronOmega22;
     q12 += eePrefactor * (7.0 / 4.0 * electronOmega22 - 2.0 * electronOmega23);
     q22 += eePrefactor * (77.0 / 16.0 * electronOmega22 - 7.0 * electronOmega23 + 5.0 * electronOmega24);
@@ -2113,7 +2396,7 @@ int customLAMPLampSpeciesIndex(string speciesName)
 @nogc number customLAMPElectronTranslationalThermalConductivity(
     ref const(GasState) gs,
     ref const(number[]) lampNumberDensities,
-    double electronDensity)
+    number electronDensity)
 {
     number q11, q12, q22;
     customLAMPDevotoElectronQ(gs, lampNumberDensities, electronDensity, q11, q12, q22);
@@ -2142,6 +2425,7 @@ public:
         allocateMatrix(mViscosityLU, CUSTOM_LAMP_HEAVY_SPECIES);
         allocateMatrix(mThermalCore, CUSTOM_LAMP_THERMAL_SYSTEM);
         allocateMatrix(mThermalLU, CUSTOM_LAMP_THERMAL_SYSTEM);
+        allocateMatrix(mThermalBorderedLU, CUSTOM_LAMP_THERMAL_SYSTEM + 1);
         mViscosityBorderCol.length = CUSTOM_LAMP_HEAVY_SPECIES;
         mViscosityBorderRow.length = CUSTOM_LAMP_HEAVY_SPECIES;
         mViscosityScratch.length = CUSTOM_LAMP_HEAVY_SPECIES;
@@ -2152,6 +2436,7 @@ public:
         mThermalScratch.length = CUSTOM_LAMP_THERMAL_SYSTEM;
         mThermalSolution.length = CUSTOM_LAMP_THERMAL_SYSTEM;
         mThermalPivots.length = CUSTOM_LAMP_THERMAL_SYSTEM;
+        mThermalBorderedPivots.length = CUSTOM_LAMP_THERMAL_SYSTEM + 1;
         foreach (isp, speciesName; speciesNames) {
             int lampIndex = customLAMPLampSpeciesIndex(speciesName);
             if (lampIndex < 0) {
@@ -2161,13 +2446,19 @@ public:
             }
             mGDTKToLAMPIndex[isp] = lampIndex;
         }
+        if (transportFingerprintEnabled(L)) {
+            writefln(
+                "TRANSPORT_FINGERPRINT: CustomLAMP active class=CustomLAMPTransProps n_species=%d",
+                mNSpecies
+            );
+        }
     }
 
     @nogc
     void numberDensities(ref const(GasState) gs, ref number[] result)
     {
         debug { assert(result.length == CUSTOM_LAMP_N_SPECIES); }
-        result[] = customLAMPNumberFromDouble(1.0e-10);
+        result[] = customLAMPNumberFromDouble(CUSTOM_LAMP_NUMBER_DENSITY_FLOOR);
         foreach (gdtkIndex; 0 .. mNSpecies) {
             int lampIndex = mGDTKToLAMPIndex[gdtkIndex];
             result[lampIndex] = customLAMPNumberDensity(gs, gdtkIndex, lampIndex);
@@ -2178,9 +2469,9 @@ public:
     override void updateTransProps(ref GasState gs, GasModel gm)
     {
         numberDensities(gs, mLampNumberDensities);
-        double totalNumberDensity = 0.0;
-        foreach (numberDensity; mLampNumberDensities) totalNumberDensity += customLAMPReal(numberDensity);
-        double electronDensity = customLAMPReal(mLampNumberDensities[10]);
+        number totalNumberDensity = 0.0;
+        foreach (numberDensity; mLampNumberDensities) totalNumberDensity += numberDensity;
+        number electronDensity = mLampNumberDensities[10];
         customLAMPCopyHeavyNumberDensities(mLampNumberDensities, mHeavyNumberDensities);
         customLAMPBuildHeavyCollisionMatrices(gs, electronDensity, mCollision11, mCollision12, mCollision13, mCollision22);
         gs.mu = customLAMPViscosity(
@@ -2196,8 +2487,12 @@ public:
             mViscosityScratch,
             mViscositySolution
         );
+        if (!customLAMPFiniteNumber(gs.mu)) {
+            customLAMPDiagNonFinite("mu".ptr, gs, gs.mu, totalNumberDensity, electronDensity);
+            throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite mu");
+        }
         customLAMPBuildHeavyBinaryDiffusion(gs, totalNumberDensity, electronDensity, mHeavyBinaryDiffusion);
-        gs.k = customLAMPHeavyTranslationalThermalConductivity(
+        number kHeavyTrans = customLAMPHeavyTranslationalThermalConductivity(
             gs,
             mHeavyNumberDensities,
             mCollision11,
@@ -2208,15 +2503,31 @@ public:
             mThermalBorderCol,
             mThermalBorderRow,
             mThermalLU,
+            mThermalBorderedLU,
             mThermalPivots,
+            mThermalBorderedPivots,
             mThermalScratch,
             mThermalSolution
-        ) + customLAMPHeavyInternalRotationalThermalConductivity(
+        );
+        if (!customLAMPFiniteNumber(kHeavyTrans)) {
+            customLAMPDiagNonFinite("k-heavy-trans".ptr, gs, kHeavyTrans, totalNumberDensity, electronDensity);
+            throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite k-heavy-trans");
+        }
+        number kRot = customLAMPHeavyInternalRotationalThermalConductivity(
             gs,
             mLampNumberDensities,
             totalNumberDensity,
             mHeavyBinaryDiffusion
         );
+        if (!customLAMPFiniteNumber(kRot)) {
+            customLAMPDiagNonFinite("k-rot".ptr, gs, kRot, totalNumberDensity, electronDensity);
+            throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite k-rot");
+        }
+        gs.k = kHeavyTrans + kRot;
+        if (!customLAMPFiniteNumber(gs.k)) {
+            customLAMPDiagNonFinite("k".ptr, gs, gs.k, totalNumberDensity, electronDensity);
+            throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite k");
+        }
         customLAMPBuildHeavyModalHeatCapacities(gs, mVibrationalHeatCapacity, mElectronicHeatCapacity);
         if (gs.k_modes.length > 0) {
             gs.k_modes[0] = customLAMPHeavyInternalThermalConductivityFromModalHeatCapacity(
@@ -2236,6 +2547,10 @@ public:
                 mLampNumberDensities,
                 electronDensity
             );
+            if (!customLAMPFiniteNumber(gs.k_modes[0])) {
+                customLAMPDiagNonFinite("k_modes[0]".ptr, gs, gs.k_modes[0], totalNumberDensity, electronDensity);
+                throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite k_modes[0]");
+            }
         }
     }
 
@@ -2243,9 +2558,9 @@ public:
     override void binaryDiffusionCoefficients(ref const(GasState) gs, ref number[][] D)
     {
         numberDensities(gs, mLampNumberDensities);
-        double totalNumberDensity = 0.0;
-        foreach (numberDensity; mLampNumberDensities) totalNumberDensity += customLAMPReal(numberDensity);
-        double electronDensity = customLAMPReal(mLampNumberDensities[10]);
+        number totalNumberDensity = 0.0;
+        foreach (numberDensity; mLampNumberDensities) totalNumberDensity += numberDensity;
+        number electronDensity = mLampNumberDensities[10];
         foreach (isp; 0 .. mNSpecies) {
             foreach (jsp; 0 .. mNSpecies) {
                 if (isp == jsp) {
@@ -2258,6 +2573,14 @@ public:
                         mGDTKToLAMPIndex[isp],
                         mGDTKToLAMPIndex[jsp]
                     );
+                    if (!customLAMPFiniteNumber(D[isp][jsp])) {
+                        customLAMPDiagNonFinite("binary-diffusion".ptr, gs, D[isp][jsp], totalNumberDensity, electronDensity);
+                        printf(
+                            "CUSTOM_LAMP_TRANSPORT_DIAG: binary-diffusion indices isp=%d jsp=%d lamp-i=%d lamp-j=%d\n",
+                            isp, jsp, mGDTKToLAMPIndex[isp], mGDTKToLAMPIndex[jsp]
+                        );
+                        throw new Error("CUSTOM_LAMP_TRANSPORT_DIAG: non-finite binary diffusion");
+                    }
                 }
             }
         }
@@ -2279,6 +2602,7 @@ private:
     number[][] mViscosityLU;
     number[][] mThermalCore;
     number[][] mThermalLU;
+    number[][] mThermalBorderedLU;
     number[] mViscosityBorderCol;
     number[] mViscosityBorderRow;
     number[] mViscosityScratch;
@@ -2289,6 +2613,7 @@ private:
     number[] mThermalScratch;
     number[] mThermalSolution;
     int[] mThermalPivots;
+    int[] mThermalBorderedPivots;
 
     void allocateMatrix(ref number[][] matrix, int size)
     {
@@ -2299,6 +2624,89 @@ private:
     }
 }
 
+class EquilibriumTemperatureTransProps : TransportPropertiesModel {
+public:
+    this(TransportPropertiesModel underlying, string[] speciesNames, double[] molMasses)
+    {
+        mUnderlying = underlying;
+        mScratch = GasState(cast(uint)speciesNames.length, 1);
+        foreach (isp, speciesName; speciesNames) {
+            if (speciesName == "e-" || speciesName == "eminus") {
+                mElectronIdx = to!int(isp);
+                mElectronGasConstant = R_universal / molMasses[isp];
+            }
+        }
+    }
+
+    @nogc
+    override void updateTransProps(ref GasState gs, GasModel gm)
+    {
+        prepareScratch(gs);
+        updateElectronPressure(gs);
+        mUnderlying.updateTransProps(mScratch, gm);
+        gs.mu = mScratch.mu;
+        gs.k = mScratch.k + mScratch.k_modes[0];
+        gs.sigma = mScratch.sigma;
+    }
+
+    @nogc
+    override void binaryDiffusionCoefficients(ref const(GasState) gs, ref number[][] D)
+    {
+        prepareScratch(gs);
+        updateElectronPressure(gs);
+        mUnderlying.binaryDiffusionCoefficients(mScratch, D);
+    }
+
+    void customLAMPNumberDensities(ref const(GasState) gs, ref number[] result)
+    {
+        prepareScratch(gs);
+        auto customLAMP = cast(CustomLAMPTransProps)mUnderlying;
+        if (customLAMP is null) {
+            throw new Error(
+                "customLAMPNumberDensities() requires an equilibrium-temperature CustomLAMP model."
+            );
+        }
+        customLAMP.numberDensities(mScratch, result);
+    }
+
+private:
+    TransportPropertiesModel mUnderlying;
+    GasState mScratch;
+    int mElectronIdx = -1;
+    double mElectronGasConstant = 0.0;
+
+    @nogc
+    void prepareScratch(ref const(GasState) gs)
+    {
+        mScratch.rho = gs.rho;
+        mScratch.p = gs.p;
+        mScratch.p_e = gs.p_e;
+        mScratch.T = gs.T;
+        mScratch.u = gs.u;
+        mScratch.a = gs.a;
+        mScratch.mu = gs.mu;
+        mScratch.k = gs.k;
+        mScratch.sigma = gs.sigma;
+        mScratch.quality = gs.quality;
+        mScratch.T_modes[0] = gs.T;
+        mScratch.u_modes[0] = 0.0;
+        mScratch.k_modes[0] = 0.0;
+        foreach (isp; 0 .. gs.massf.length) {
+            mScratch.massf[isp] = gs.massf[isp];
+            mScratch.rho_s[isp] = gs.rho * gs.massf[isp];
+        }
+    }
+
+    @nogc
+    void updateElectronPressure(ref const(GasState) gs)
+    {
+        if (mElectronIdx < 0) {
+            mScratch.p_e = 0.0;
+            return;
+        }
+        mScratch.p_e = gs.rho * gs.massf[mElectronIdx]
+            * mElectronGasConstant * gs.T;
+    }
 }
 
 class ScaledTwoTemperatureTransProps : TwoTemperatureTransProps {
@@ -2314,6 +2722,15 @@ public:
         requirePositive("k_scale", mKScale);
         requirePositive("k_modes_scale", mKModesScale);
         requirePositive("diffusion_scale", mDiffusionScale);
+        if (transportFingerprintEnabled(L)) {
+            writefln(
+                "TRANSPORT_FINGERPRINT: ScaledGuptaYos active class=ScaledTwoTemperatureTransProps mu_scale=%.15e k_scale=%.15e k_modes_scale=%.15e diffusion_scale=%.15e",
+                mMuScale,
+                mKScale,
+                mKModesScale,
+                mDiffusionScale
+            );
+        }
     }
 
     @nogc
